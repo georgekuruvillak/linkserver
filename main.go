@@ -31,7 +31,7 @@ var pipe = new(Pipe)
 
 func main() {
 	flag.Parse()
-	log.SetFlags(0)
+	//log.SetFlags(0)
 	http.HandleFunc("/source", source)
 	http.HandleFunc("/sink", sink)
 	http.HandleFunc("/", home)
@@ -65,13 +65,17 @@ func sink(w http.ResponseWriter, r *http.Request) {
 	defer sinkConn.Close()
 	go func(p *Pipe) {
 		for {
+			log.Println("Start read message.")
 			mt, message, err := p.sourceConn.ReadMessage()
+			log.Println("Done read message.")
 			if err != nil {
 				log.Println("read:", err)
 				break
 			}
 
+			log.Println("Start send message.")
 			err = p.sinkConn.WriteMessage(mt, message)
+			log.Println("Done sending message.")
 			if err != nil {
 				log.Println("write:", err)
 				break
