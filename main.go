@@ -2,6 +2,7 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"html/template"
 	"log"
 	"net/http"
@@ -16,7 +17,10 @@ var upgrader = websocket.Upgrader{
 	},
 }
 var sourceConn *websocket.Conn
-var sinkConn *websocket.Conn
+var sinkConn []*websocket.Conn
+var sourceAdd chan struct{}
+var sinkAdd chan struct{}
+var antiPoller struct{}
 
 func init() {
 	flag.StringVar(&addr, "addr", "0.0.0.0:8080", "link address")
@@ -24,18 +28,36 @@ func init() {
 
 type Pipe struct {
 	sourceConn *websocket.Conn
-	sinkConn   *websocket.Conn
+	sinkConn   []*websocket.Conn
+	pipeChan   chan Message
 }
 
-var pipe = new(Pipe)
+type Message struct {
+	message []byte
+	mt      int
+}
+
+var pipe Pipe
 
 func main() {
+
 	flag.Parse()
-	//log.SetFlags(0)
+	pipe = Pipe{
+		sourceConn: nil,
+		sinkConn:   nil,
+	}
+	sourceToSink := make(chan Message, 1)
+	sourceAdd = make(chan struct{})
+	sinkAdd = make(chan struct{})
+	pipe.pipeChan = sourceToSink
+	go readFromSource()
+	go writeToSink()
 	http.HandleFunc("/source", source)
 	http.HandleFunc("/sink", sink)
 	http.HandleFunc("/", home)
 	log.Fatal(http.ListenAndServe(addr, nil))
+
+	select {}
 }
 
 func home(w http.ResponseWriter, r *http.Request) {
@@ -45,46 +67,75 @@ func home(w http.ResponseWriter, r *http.Request) {
 
 func source(w http.ResponseWriter, r *http.Request) {
 	s, err := upgrader.Upgrade(w, r, nil)
-	pipe.sourceConn = s
 	if err != nil {
 		log.Print("upgrade:", err)
 		return
 	}
-	defer s.Close()
-	select {}
+	pipe.sourceConn = s
+	sourceAdd <- antiPoller
+	//	defer s.Close()
+	//	select {}
 
 }
 
 func sink(w http.ResponseWriter, r *http.Request) {
 	s, err := upgrader.Upgrade(w, r, nil)
-	pipe.sinkConn = s
 	if err != nil {
 		log.Print("upgrade:", err)
 		return
 	}
-	defer sinkConn.Close()
-	go func(p *Pipe) {
-		for {
-			log.Println("Start read message.")
-			mt, message, err := p.sourceConn.ReadMessage()
-			log.Println("Done read message.")
-			if err != nil {
-				log.Println("read:", err)
-				break
+	pipe.sinkConn = append(pipe.sinkConn, s)
+	sinkAdd <- antiPoller
+	/*
+		defer func() {
+			for _, c := range pipe.sinkConn {
+				c.Close()
 			}
+		}()
+	*/
+	//	select {}
+}
 
-			log.Println("Start send message.")
-			err = p.sinkConn.WriteMessage(mt, message)
-			log.Println("Done sending message.")
-			if err != nil {
-				log.Println("write:", err)
-				break
+func readFromSource() {
+	<-sourceAdd
+	for {
+		//log.Println("Start read message.")
+		mtype, mesg, err := pipe.sourceConn.ReadMessage()
+		if err != nil {
+			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+				log.Printf("error: %v", err)
 			}
-
+			break
 		}
-	}(pipe)
-	defer s.Close()
-	select {}
+		//log.Println("Done read message.")
+		m := Message{
+			message: mesg,
+			mt:      mtype,
+		}
+		pipe.pipeChan <- m
+	}
+}
+
+func writeToSink() {
+	<-sinkAdd
+	for {
+		m := <-pipe.pipeChan
+
+		for i, c := range pipe.sinkConn {
+			//log.Println("Start send message.")
+			err := c.WriteMessage(m.mt, m.message)
+			if err != nil {
+				pipe.sinkConn = append(pipe.sinkConn[:i], pipe.sinkConn[(i+1):]...)
+				if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+					log.Printf("error: %v", err)
+				}
+				fmt.Printf("%v\n", err)
+				continue
+			}
+			//log.Println("Done sending message.")
+		}
+
+	}
 }
 
 var homeTemplate = template.Must(template.New("").Parse(`
