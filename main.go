@@ -68,9 +68,13 @@ func home(w http.ResponseWriter, r *http.Request) {
 func source(w http.ResponseWriter, r *http.Request) {
 	s, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Print("upgrade:", err)
+		log.Fatalf("upgrade:", err)
 		return
 	}
+	if pipe.sourceConn != nil {
+		pipe.sourceConn.Close()
+	}
+
 	pipe.sourceConn = s
 	sourceAdd <- antiPoller
 	//	defer s.Close()
@@ -99,13 +103,14 @@ func sink(w http.ResponseWriter, r *http.Request) {
 func readFromSource() {
 	<-sourceAdd
 	for {
-		//log.Println("Start read message.")
+		log.Println("Start source read message.")
 		mtype, mesg, err := pipe.sourceConn.ReadMessage()
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
 				log.Printf("error: %v", err)
 			}
-			break
+			log.Println("Error in conn. Waiting for new source.")
+			<-sourceAdd
 		}
 		//log.Println("Done read message.")
 		m := Message{
@@ -113,6 +118,7 @@ func readFromSource() {
 			mt:      mtype,
 		}
 		pipe.pipeChan <- m
+		log.Println("Done  source read message.")
 	}
 }
 
@@ -122,17 +128,17 @@ func writeToSink() {
 		m := <-pipe.pipeChan
 
 		for i, c := range pipe.sinkConn {
-			//log.Println("Start send message.")
+			log.Printf("Start sink read message. %d\n", m.mt)
 			err := c.WriteMessage(m.mt, m.message)
 			if err != nil {
-				pipe.sinkConn = append(pipe.sinkConn[:i], pipe.sinkConn[(i+1):]...)
 				if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+					pipe.sinkConn = append(pipe.sinkConn[:i], pipe.sinkConn[(i+1):]...)
 					log.Printf("error: %v", err)
 				}
-				fmt.Printf("%v\n", err)
+				fmt.Printf("Here :%v\n", err)
 				continue
 			}
-			//log.Println("Done sending message.")
+			log.Println("Done sink sending message.")
 		}
 
 	}
